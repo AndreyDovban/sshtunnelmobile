@@ -4,7 +4,6 @@ package tunnel
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strings" // Нужен для зачистки пробелов
 	"time"
@@ -17,18 +16,59 @@ import (
 var (
 	currentClient *ssh.Client
 	socksListener net.Listener
+	ctxCancel     context.CancelFunc
 )
+
+func startKeepAlive(ctx context.Context, client *ssh.Client, interval int) {
+	// Если интервал не задан или равен 0, пинги слать не нужно
+	if interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	sendPrintf("[Keep-Alive] Фоновый пинг запущен с интервалом %d сек.", interval)
+
+	for {
+		select {
+		case <-ticker.C:
+			// Шлем пинг серверу. Флаг true означает, что мы ждем подтверждения (reply)
+			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+			if err != nil {
+				sendPrintf("[Keep-Alive] Сервер не ответил на пинг: %v. Завершаем работу.", err)
+				// В будущем здесь нужно будет вызвать колбэк, чтобы сообщить Kotlin об обрыве связи
+				return
+			}
+			sendLog("[Keep-Alive] Пинг успешно отправлен и подтвержден сервером")
+
+		case <-ctx.Done():
+			// Как только в StopTunnel вызовется ctxCancel(), мы мгновенно попадем сюда
+			sendLog("[Keep-Alive] Получен сигнал остановки. Фоновый пинг завершен.")
+			return
+		}
+	}
+}
 
 // StartTunnel — это главная точка входа. Она настраивает SSH, открывает порт и запускает SOCKS5.
 func StartTunnel(cfg *Config) string {
-	log.Println("Запуск SSH туннеля...")
+	sendLog("Запуск SSH туннеля...")
 
 	// 1. Устанавливаем соединение с VPS
 	client, err := Connect(cfg)
 	if err != nil {
+		sendPrintf("Ошибка SSH подключения: %v", err)
 		return fmt.Sprintf("Ошибка SSH подключения: %v", err)
 	}
-	log.Println("Успешное SSH-подключение к серверу!")
+	sendLog("Успешное SSH-подключение к серверу!")
+
+	// Инициализируем контекст отмены для фонового Keep-Alive пакетов
+	// Бэкграунд-контекст оборачиваем в возможность отмены
+	ctx, cancel := context.WithCancel(context.Background())
+	ctxCancel = cancel // Запоминаем функцию отмены в глобальной переменной
+
+	// Запускаем фоновый пинг сервера в отдельной горутине
+	go startKeepAlive(ctx, client, cfg.ServerAliveInterval)
 
 	// 2. Настраиваем SOCKS5-сервер так, чтобы он перенаправлял запросы внутрь SSH сессии
 	socksConf := &socks5.Config{
@@ -39,6 +79,7 @@ func StartTunnel(cfg *Config) string {
 	server, err := socks5.New(socksConf)
 	if err != nil {
 		StopTunnel()
+		sendPrintf("Ошибка инициализации SOCKS5: %v", err)
 		return fmt.Sprintf("Ошибка инициализации SOCKS5: %v", err)
 	}
 
@@ -46,17 +87,18 @@ func StartTunnel(cfg *Config) string {
 	l, err := net.Listen("tcp", cfg.LocalProxyAddress)
 	if err != nil {
 		StopTunnel()
+		sendPrintf("Ошибка портов (возможно, порт занят): %v", err)
 		return fmt.Sprintf("Ошибка портов (возможно, порт занят): %v", err)
 	}
 	SetListener(l)
-	log.Printf("Локальный прокси-сервер запущен на %s", cfg.LocalProxyAddress)
+	sendPrintf("Локальный прокси-сервер запущен на %s", cfg.LocalProxyAddress)
 
 	// 4. Запускаем обслуживание SOCKS5 сервера.
 	// Метод Serve блокирует поток, поэтому на компьютере или в Android мы будем запускать StartTunnel в горутине.
 	go func() {
 		if err := server.Serve(l); err != nil {
 			// Если туннель закрыли принудительно через StopTunnel(), Serve вернет ошибку закрытого листнера — это нормально
-			log.Printf("SOCKS5 сервер остановлен: %v", err)
+			sendPrintf("SOCKS5 сервер остановлен: %v", err)
 		}
 	}()
 
@@ -92,7 +134,7 @@ func Connect(cfg *Config) (*ssh.Client, error) {
 		Timeout:         10 * time.Second,
 	}
 
-	log.Printf("Подключение к SSH %s...", cfg.ServerAddress)
+	sendPrintf("Подключение к SSH %s...", cfg.ServerAddress)
 	client, err := ssh.Dial("tcp", cfg.ServerAddress, sshConfig)
 	if err != nil {
 		return nil, err
@@ -109,19 +151,25 @@ func SetListener(l net.Listener) {
 
 // StopTunnel мгновенно и чисто закрывает все сетевые ресурсы
 func StopTunnel() {
-	log.Println("Выключение туннеля и освобождение портов...")
+	sendLog("Выключение туннеля и освобождение портов...")
 
-	// 1. Закрываем локальный порт (сервер SOCKS5 сразу остановится)
+	// 1. Посылаем сигнал отмены всем фоновым горутинам (включая Keep-Alive)
+	if ctxCancel != nil {
+		ctxCancel()
+		ctxCancel = nil
+	}
+
+	// 2. Закрываем локальный порт SOCKS5
 	if socksListener != nil {
 		socksListener.Close()
 		socksListener = nil
 	}
 
-	// 2. Рвем соединение с сервером
+	// 3. Рвем соединение с сервером
 	if currentClient != nil {
 		currentClient.Close()
 		currentClient = nil
 	}
 
-	log.Println("Туннель полностью остановлен. Порты свободны!")
+	sendLog("Туннель полностью остановлен. Порты свободны!")
 }
