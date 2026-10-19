@@ -3,6 +3,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings" // Нужен для зачистки пробелов
@@ -51,11 +52,19 @@ func startKeepAlive(ctx context.Context, client *ssh.Client, interval int) {
 }
 
 // StartTunnel — это главная точка входа. Она настраивает SSH, открывает порт и запускает SOCKS5.
-func StartTunnel(cfg *Config) string {
+func StartTunnel(configJSON string) string {
+	var cfg Config
+	err := json.Unmarshal([]byte(configJSON), &cfg)
+	if err != nil {
+		// Если Kotlin прислал кривой JSON, сразу пишем об этом в логи
+		sendPrintf("Ошибка парсинга конфигурации JSON: %v", err)
+		return fmt.Sprintf("Ошибка парсинга конфигурации JSON: %v", err)
+	}
+
 	sendLog("Запуск SSH туннеля...")
 
 	// 1. Устанавливаем соединение с VPS
-	client, err := Connect(cfg)
+	client, err := Connect(&cfg)
 	if err != nil {
 		sendPrintf("Ошибка SSH подключения: %v", err)
 		return fmt.Sprintf("Ошибка SSH подключения: %v", err)

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,16 +22,24 @@ func (c ConsoleLogger) OnLogReceived(msg string) {
 
 func main() {
 	fmt.Println("--- Старт тестового Go-приложения ---")
-	// В будущем эти данные прилетят из текстовых полей Kotlin Compose
+	// Загружаем конфигурацию из config.json
 	cfg, err := tunnel.LoadConfig("config.json")
 	if err != nil {
 		fmt.Printf("Ошибка загрузки config.json: %v\n", err)
 		return
 	}
 
+	// Переводим структуру в JSON-строку, имитируя поведение Kotlin
+	// (импортируй пакет "encoding/json" в main.go, если компилятор ругнётся)
+	jsonData, err := json.Marshal(cfg)
+	if err != nil {
+		fmt.Printf("Ошибка маршалинга в JSON: %v\n", err)
+		return
+	}
+
 	// Запускаем туннель асинхронно
 	go func() {
-		status := tunnel.StartTunnel(cfg)
+		status := tunnel.StartTunnel(string(jsonData))
 		fmt.Printf("[MAIN] Статус запуска туннеля: %s\n", status)
 	}()
 
