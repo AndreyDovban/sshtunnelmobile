@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44" fill="none">
   <!-- Красный скругленный фон -->
-  <rect width="44" height="44" rx="10" fill="#E2112E"/>
+  <rect width="44" height="44" rx="10" fill="#000000"/>
   
   <!-- Три четкие изолированные линии шлейфа (эффект скорости) -->
   <path d="M6 33L15 11H17.2L8.2 33H6Z" fill="#F3F4F6"/>
