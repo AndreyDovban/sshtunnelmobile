@@ -38,7 +38,14 @@ func startKeepAlive(ctx context.Context, client *ssh.Client, interval int) {
 			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
 				sendPrintf("[Keep-Alive] Сервер не ответил на пинг: %v. Завершаем работу.", err)
-				// В будущем здесь нужно будет вызвать колбэк, чтобы сообщить Kotlin об обрыве связи
+				// 1. Сначала принудительно очищаем все ресурсы туннеля внутри Go,
+				// так как сессия всё равно мертва.
+				StopTunnel()
+
+				// 2. Вызываем коллбэк, чтобы Котлин мгновенно переключил UI/Сервис в ошибку
+				if appStatusListener != nil {
+					appStatusListener.OnConnectionLost(err.Error())
+				}
 				return
 			}
 			sendLog("[Keep-Alive] Пинг успешно отправлен и подтвержден сервером")
