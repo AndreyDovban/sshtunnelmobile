@@ -13,15 +13,15 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Сохраняем ссылки на активные сессии, чтобы их можно было закрыть извне
+// Ссылки на активные сессии, чтобы их можно было закрыть извне
 var (
 	currentClient *ssh.Client
 	socksListener net.Listener
 	ctxCancel     context.CancelFunc
 )
 
+// Пинг сервера
 func startKeepAlive(ctx context.Context, client *ssh.Client, interval int) {
-	// Если интервал не задан или равен 0, пинги слать не нужно
 	if interval <= 0 {
 		return
 	}
@@ -29,29 +29,36 @@ func startKeepAlive(ctx context.Context, client *ssh.Client, interval int) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	sendPrintf("[Keep-Alive] Фоновый пинг запущен с интервалом %d сек.", interval)
+	const maxAliveAttempts = 7
+	failedAttempts := 0
+
+	sendPrintf("[Keep-Alive] Фоновый пинг запущен с интервалом %d сек. (Лимит пропущенных пингов: %d)", interval, maxAliveAttempts)
 
 	for {
 		select {
 		case <-ticker.C:
-			// Шлем пинг серверу. Флаг true означает, что мы ждем подтверждения (reply)
 			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
 			if err != nil {
-				sendPrintf("[Keep-Alive] Сервер не ответил на пинг: %v. Завершаем работу.", err)
-				// 1. Сначала принудительно очищаем все ресурсы туннеля внутри Go,
-				// так как сессия всё равно мертва.
-				StopTunnel()
+				failedAttempts++
+				sendPrintf("[Keep-Alive] Предупреждение: Сервер не ответил на пинг (Сбой %d из %d): %v", failedAttempts, maxAliveAttempts, err)
 
-				// 2. Вызываем коллбэк, чтобы Котлин мгновенно переключил UI/Сервис в ошибку
-				if appStatusListener != nil {
-					appStatusListener.OnConnectionLost(err.Error())
+				if failedAttempts >= maxAliveAttempts {
+					sendPrintf("[Keep-Alive] Фатально: Связь потеряна окончательно (пропущено %d пингов). Закрываем туннель.", failedAttempts)
+					StopTunnel()
+					if appStatusListener != nil {
+						appStatusListener.OnConnectionLost(err.Error())
+					}
+					return
 				}
-				return
+			} else {
+				if failedAttempts > 0 {
+					sendLog("[Keep-Alive] Связь успешно восстановилась, счетчик сбоев сброшен.")
+				}
+				failedAttempts = 0
+				sendLog("[Keep-Alive] Пинг успешно отправлен и подтвержден сервером")
 			}
-			sendLog("[Keep-Alive] Пинг успешно отправлен и подтвержден сервером")
 
 		case <-ctx.Done():
-			// Как только в StopTunnel вызовется ctxCancel(), мы мгновенно попадем сюда
 			sendLog("[Keep-Alive] Получен сигнал остановки. Фоновый пинг завершен.")
 			return
 		}
